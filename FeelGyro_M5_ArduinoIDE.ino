@@ -80,11 +80,12 @@ void showWelcomeScreen() {
   M5.Lcd.setTextSize(2);
   M5.Lcd.setTextColor(WHITE, 0x03BF);
   M5.Lcd.setCursor(120, 135/2 - 16/2);
+  M5.Lcd.print("Welcome");
 }
 
 // 電圧計測補正関数（テスタでの測定値3点を元に最小二乗法で導出） 
 float calibrateVoltage(float rawVoltage) {
-  return rawVoltage * 0.8186 + 4.23;
+  return rawVoltage + 1.2;
 }
 
 // バッテリー表示（スプライト描画用）
@@ -192,6 +193,7 @@ void loop() {
   sprite.setCursor(130 + (24*4 - 18*3) , 50);  
   sprite.printf("RPM");
 
+  /*
   // 巻き線温度
   sprite.setFont(&fonts::Font0);  
   sprite.setTextSize(4);       
@@ -201,6 +203,7 @@ void loop() {
   sprite.setTextSize(3); 
   sprite.setCursor(130 + (24*4 - (24*2 + 18 + 5)) + 48 + 5,88+6);  
   sprite.printf("C");
+  */
 
   // 数字表示（左寄せ調整）
   sprite.setTextSize(3);
