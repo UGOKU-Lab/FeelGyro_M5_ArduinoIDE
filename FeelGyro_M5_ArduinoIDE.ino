@@ -1,271 +1,233 @@
 #include <M5StickCPlus2.h>
-#include <M5GFX.h>  
-#include "UGOKU_Pad_Controller.hpp" 
+#include <M5GFX.h>
+#include "UGOKU_Pad_Controller.hpp"
 
+//---- サウンド定義 ----
 #define Ef5 622
 #define Bf4 466
 #define Af4 415
 #define Ef4 311
 
-UGOKU_Pad_Controller controller;      // Instantiate the UGOKU Pad Controller object
-uint8_t CH;                           // Variable to store the channel number
-uint8_t VAL;                          // Variable to store the value for the servo control
+//---- インスタンス ----
+UGOKU_Pad_Controller controller;
+LGFX_Sprite sprite(&M5.Lcd);
 
-bool isConnected = false;             // Boolean flag to track BLE connection status
+//---- ピン定義 ----
+const int buzzerPin       = 2;
+const int analogPin       = 36;
+const int BUTTON_SET_HIGH = 0;   // 全開ボタン
+const int BUTTON_SET_LOW  = 26;  // 停止／ブレーキボタン
+const int CONTROL_PIN     = 32;  // LSB
+const int CONTROL_PIN_2   = 33;  // MSB
 
-const int buzzerPin = 2; 
-
-const int analogPin = 36;
+//---- 電圧計測定数 ----
 const float R1 = 2000.0;
 const float R2 = 220.0;
 const float voltageDividerRatio = R2 / (R1 + R2);
 const float adcMax = 4095.0;
 const float vRef = 3.3;
 
-int rpm = 0; 
-int temp = 23;
+//---- グローバル変数 ----
+bool     isConnected    = false;
+int      ControlState   = 0;      // 0b00:停止, 0b01:全開, 0b11:ブレーキ
+int      rpm            = 0;
+uint8_t  lastCh1Val     = 0xFF, lastCh2Val = 0xFF, lastCh3Val = 0xFF;
 
-//Button
-const int BUTTON_SET_LOW = 26;
-const int BUTTON_SET_HIGH = 0;
+//---- ボタン＆デバウンス用 ----
+bool     prevHighState  = false;
+bool     prevLowState   = false;
+unsigned long lowPressStart  = 0;
+bool     lowLongHandled      = false;
+const unsigned long DEBOUNCE_MS  = 50;
+const unsigned long LONGPRESS_MS = 2000;
 
-//TEMP GPIO Control 
-const int CONTROL_PIN = 32;  // G32
-const int CONTROL_PIN_2 = 33;
+//---- バッテリーオフ閾値 ----
+const float cutoffVoltage = 5.0;  // V
 
-bool prevBtnHigh = HIGH;
-bool prevBtnLow = HIGH;
-bool setControlState = LOW;
-int prevValCh0 = HIGH;
-int prevValCh1 = HIGH;
-int prevValCh2 = HIGH;
+//---- コールバック ----
+void onDeviceConnect() {
+  Serial.println("[BLE] Connected");
+  isConnected = true;
+}
+void onDeviceDisconnect() {
+  Serial.println("[BLE] Disconnected");
+  isConnected = false;
+}
 
-uint8_t lastCh1Val = 0xFF;
-uint8_t lastCh2Val = 0xFF;
-
-//LGFX_Sprite for M5GFX
-LGFX_Sprite sprite = LGFX_Sprite(&M5.Lcd);
-const int spriteWidth = 240;
-const int spriteHeight = 135;
-
-uint16_t SFGreen = sprite.color565(0, 255, 180);
-
-uint8_t lastPrintedCh;
-uint8_t lastPrintedVal;
-
+//---- ヘルパー関数 ----
 void playXPSound() {
-  float qn = 0.3;
-  tone(buzzerPin, Ef5); delay(qn * 3 / 4 * 1500);     
-  tone(buzzerPin, Ef4); delay(qn * 500);     
-  tone(buzzerPin, Bf4); delay(qn * 1000);        
-  tone(buzzerPin, Af4); delay(qn * 1500);   
-  tone(buzzerPin, Ef5); delay(qn * 1000);         
-  tone(buzzerPin, Bf4); delay(qn * 2000);     
+  float q = 0.3;
+  tone(buzzerPin, Ef5); delay(q*3/4*1500);
+  tone(buzzerPin, Ef4); delay(q*500);
+  tone(buzzerPin, Bf4); delay(q*1000);
+  tone(buzzerPin, Af4); delay(q*1500);
+  tone(buzzerPin, Ef5); delay(q*1000);
+  tone(buzzerPin, Bf4); delay(q*2000);
   noTone(buzzerPin);
 }
 
 void showWelcomeScreen() {
-  //background
-  M5.Lcd.fillRect(0, 0, 240, 45, 0x0010);   // dark blue
-  M5.Lcd.fillRect(0, 18, 240, 120, 0x03BF);  // mid blue
-  M5.Lcd.fillRect(0, 117, 240, 45, 0x0010);  // dark blue
-  
-  //water line
+  M5.Lcd.fillRect(0, 0, 240, 45, 0x0010);
+  M5.Lcd.fillRect(0, 18, 240, 120, 0x03BF);
+  M5.Lcd.fillRect(0, 117, 240, 45, 0x0010);
   M5.Lcd.drawLine(0, 18, 240, 18, 0x7DDF);
-  
-  //red line
   M5.Lcd.drawLine(0, 117, 240, 117, 0xF800);
-  
-  //welcome
   M5.Lcd.setTextSize(2);
   M5.Lcd.setTextColor(WHITE, 0x03BF);
-  M5.Lcd.setCursor(120, 135/2 - 16/2);
+  M5.Lcd.setCursor(120, 135/2 - 8);
   M5.Lcd.print("Welcome");
 }
 
-// 電圧計測補正関数（テスタでの測定値3点を元に最小二乗法で導出） 
-float calibrateVoltage(float rawVoltage) {
-  return rawVoltage + 1.2;
+// 電圧補正（最小二乗法などで求めた補正式を適用）
+float calibrateVoltage(float raw) {
+  return raw + 1.2;
 }
 
-// バッテリー表示（スプライト描画用）
+// バッテリーアイコン描画
 void drawBattery(float voltage, float percentage) {
-  int margin = 2;
-  int x = 40, y = 75;
-  int w = 35, h = 50;
-  int usableHeight = h - margin * 2;
-  int levelHeight = map((int)percentage, 0, 100, 0, usableHeight);
-
-  // 色決定
-  uint16_t fillColor = GREEN;
-  if (percentage < 20) fillColor = RED;
-  else if (percentage < 60) fillColor = YELLOW;
-
-  // バッテリー枠と端子
+  int margin=2, x=40, y=75, w=35, h=50;
+  int usable = h - margin*2;
+  int lvl = map((int)percentage, 0, 100, 0, usable);
+  uint16_t col = (percentage<20? RED : (percentage<60? YELLOW : GREEN));
   sprite.drawRect(x, y, w, h, WHITE);
-  sprite.drawRect(x + 8, y - 6, 19, 7, WHITE);
-
-  // バッテリー中身
-  if (levelHeight > 0) {
-    int fillY = y + h - margin - levelHeight;
-    sprite.fillRect(x + margin, fillY, w - margin * 2, levelHeight, fillColor);
+  sprite.drawRect(x+8, y-6, 19, 7, WHITE);
+  if (lvl > 0) {
+    sprite.fillRect(x+margin, y+h-margin-lvl, w-margin*2, lvl, col);
   }
-
-  // 注意マーク（10%未満）
   if (percentage < 10.0) {
     sprite.setTextSize(4);
     sprite.setTextColor(RED, BLACK);
-    sprite.setCursor(x + 7, y + 11);
+    sprite.setCursor(x+7, y+11);
     sprite.print("!");
-    sprite.setTextColor(WHITE, BLACK); // 元に戻す
+    sprite.setTextColor(WHITE, BLACK);
   }
 }
 
-// Function called when a BLE device connects
-void onDeviceConnect() {
-  Serial.println("Device connected!");  // Print connection message
-  isConnected = true;                   // Set the connection flag to true
-}
-
-// Function called when a BLE device disconnects
-void onDeviceDisconnect() {
-  Serial.println("Device disconnected!");  // Print disconnection message
-  isConnected = false;                     // Set the connection flag to false
-}
-
-void setup() {
-  Serial.begin(115200);  
+void setup(){
+  Serial.begin(115200);
   M5.begin();
   M5.Lcd.setRotation(3);
   showWelcomeScreen();
   analogReadResolution(12);
   playXPSound();
 
-  // スプライト初期化
-  sprite.createSprite(spriteWidth, spriteHeight);
-  sprite.setTextColor(SFGreen, BLACK);
+  sprite.createSprite(240, 135);
+  sprite.setTextColor(sprite.color565(0,255,180), BLACK);
 
-  //仮GPIOコントロール
   pinMode(BUTTON_SET_HIGH, INPUT_PULLUP);
-  pinMode(BUTTON_SET_LOW, INPUT_PULLUP);
-  pinMode(CONTROL_PIN, OUTPUT);
-  digitalWrite(CONTROL_PIN, setControlState);
+  pinMode(BUTTON_SET_LOW,  INPUT_PULLUP);
+  pinMode(CONTROL_PIN,     OUTPUT);
+  pinMode(CONTROL_PIN_2,   OUTPUT);
+  digitalWrite(CONTROL_PIN,   0);
+  digitalWrite(CONTROL_PIN_2, 0);
 
-  // Setup the BLE connection
-  controller.setup("GYRO");       // Set the BLE device name to "My ESP32"
+  controller.setup("GYRO");
+  controller.setOnConnectCallback(onDeviceConnect);
+  controller.setOnDisconnectCallback(onDeviceDisconnect);
 
-  // Set callback functions for when a device connects and disconnects
-  controller.setOnConnectCallback(onDeviceConnect);   // Function called on device connection
-  controller.setOnDisconnectCallback(onDeviceDisconnect);  // Function called on device disconnection
+  prevHighState = false;
+  prevLowState  = false;
 }
 
-void loop() {
-  // 電圧計算
-  int raw = analogRead(analogPin);
-  float voltageAtPin = (raw / adcMax) * vRef;
-  float batteryVoltage = calibrateVoltage(voltageAtPin / voltageDividerRatio);
-  float percentage = constrain((batteryVoltage - 20.5) / (25.2 - 20.5) * 100.0, 0.0, 100.0);
-
-  // 回転数（仮：固定値 or センサー値に置換）
-  if(setControlState == LOW){
-    rpm = 0;
-  }else if(setControlState == HIGH){
-    rpm = 7000; 
-  }
-
-  // スプライトに描画
-  sprite.fillSprite(BLACK);
-  sprite.setTextColor(SFGreen, BLACK); 
-
-  // 回転数右寄
-  sprite.setTextSize(4);
-  char rpmStr[10];
-  sprintf(rpmStr, "%d", rpm);
-  
-  int textW = sprite.textWidth(rpmStr);  // 表示幅を計算
-  int x = 160 + 24 * 3 - textW - 6;     // 右端から詰めて配置
-  
-  sprite.setCursor(x, 17);               // Y位置はそのままでOK
-  sprite.print(rpmStr);
-
-  // 回転数の描画（スプライトに）
-  sprite.setTextSize(3);    
-  sprite.setCursor(130 + (24*4 - 18*3) , 50);  
-  sprite.printf("RPM");
-
-  /*
-  // 巻き線温度
-  sprite.setFont(&fonts::Font0);  
-  sprite.setTextSize(4);       
-  sprite.setCursor(130 + (24*4 - (24*2 + 18 + 10)), 88);           
-  sprite.printf("%d", temp);
-  sprite.drawCircle(130 + (24*4 - (24*2 + 18 + 10)) + 18*2 + 16, 88 + 9, 3, SFGreen);
-  sprite.setTextSize(3); 
-  sprite.setCursor(130 + (24*4 - (24*2 + 18 + 5)) + 48 + 5,88+6);  
-  sprite.printf("C");
-  */
-
-  // 数字表示（左寄せ調整）
-  sprite.setTextSize(3);
-  sprite.setCursor(30, 10);
-  sprite.printf("%3.0f%%", percentage);
-  sprite.setCursor(30-18, 40);
-  sprite.printf("%.1fV", batteryVoltage);
-
-  // バッテリー表示
-  sprite.setTextSize(1);
-  drawBattery(batteryVoltage, percentage);
-
-  // 画面に表示
-  sprite.pushSprite(0, 0);
-
-  if (batteryVoltage < 5.0) {  // 電源切れ時の「ありえない低い電圧」で判定
-    M5.Lcd.fillScreen(BLACK);  // LCD消す（見た目対策）
-    delay(100);                // 表示反映の時間
-    esp_deep_sleep_start();    // 自動スリープ！
-  }
-
-  //仮GPIOコントロール
-  bool currBtnHigh = digitalRead(BUTTON_SET_HIGH);
-  bool currBtnLow = digitalRead(BUTTON_SET_LOW);
-
-  // G0押された（HIGHにする）
-  if (prevBtnHigh == HIGH && currBtnHigh == LOW) {  // G0押された（HIGHにする）
-    setControlState = HIGH;
-  }else if(prevBtnLow == HIGH && currBtnLow == LOW) {  // G26押された（LOWにする）
-    setControlState = LOW;
-  }
-
-if (isConnected) {
+void loop(){
+  //--- BLE 読み取り ---
+  if (isConnected) {
     uint8_t err = controller.read_data();
     if (err == no_err) {
       uint8_t cnt = controller.getLastPairsCount();
-      if (cnt > 0) {
-        // チャンネル1: HIGH → setControlState = HIGH
-        uint8_t ch1 = controller.getDataByChannel(1);
-        if (ch1 != 0xFF && ch1 != lastCh1Val) {
-          lastCh1Val = ch1;
-          if (ch1 == HIGH) setControlState = HIGH;
-        }
-        // チャンネル2: HIGH → setControlState = LOW
-        uint8_t ch2 = controller.getDataByChannel(2);
-        if (ch2 != 0xFF && ch2 != lastCh2Val) {
-          lastCh2Val = ch2;
-          if (ch2 == HIGH) setControlState = LOW;
+      for (uint8_t i = 0; i < cnt; i++) {
+        uint8_t ch = controller.getDataByChannel(i+1);
+        if (ch == HIGH) {
+          if      (i+1 == 1) { ControlState = 0b01; Serial.println("[BLE] Full"); }
+          else if (i+1 == 2) { ControlState = 0b00; Serial.println("[BLE] Stop"); }
+          else if (i+1 == 3) { ControlState = 0b11; Serial.println("[BLE] Brake"); }
         }
       }
-    } else if (err == cs_err) {
-      Serial.println("Checksum error");
-    } else if (err == data_err) {
-      Serial.println("Packet length error");
+      controller.write_data(10, rpm/100);
     }
-    controller.write_data(2, rpm / 100);
   }
 
-  digitalWrite(CONTROL_PIN, setControlState);
+  //--- ボタン読み取り & デバウンス ---
+  static unsigned long lastHighChange = 0, lastLowChange = 0;
+  bool rawHigh = (digitalRead(BUTTON_SET_HIGH) == LOW);
+  bool rawLow  = (digitalRead(BUTTON_SET_LOW)  == LOW);
 
-  prevBtnHigh = currBtnHigh;
-  prevBtnLow = currBtnLow;
+  // High ボタン 短押し
+  if (rawHigh != prevHighState && millis() - lastHighChange > DEBOUNCE_MS) {
+    lastHighChange = millis();
+    prevHighState  = rawHigh;
+    if (rawHigh) {
+      ControlState = 0b01;
+      Serial.println("[BTN] High → Full");
+    }
+  }
 
-  delay(20);
+  // Low ボタン デバウンス&長押し判定
+  if (rawLow != prevLowState && millis() - lastLowChange > DEBOUNCE_MS) {
+    lastLowChange = millis();
+    if (rawLow) {
+      // 押し始め
+      lowPressStart = millis();
+      lowLongHandled = false;
+    } else {
+      // リリース
+      unsigned long dur = millis() - lowPressStart;
+      if (!lowLongHandled && dur < LONGPRESS_MS) {
+        ControlState = 0b00;
+        Serial.println("[BTN] Low → Stop");
+      }
+    }
+    prevLowState = rawLow;
+  }
+  // 長押し検出
+  if (prevLowState && !lowLongHandled && millis() - lowPressStart >= LONGPRESS_MS) {
+    ControlState   = 0b11;
+    lowLongHandled = true;
+    Serial.println("[BTN] Low long → Brake");
+  }
+
+  //--- RPM 計算 ---
+  rpm = (ControlState == 0b01) ? 7000 : 0;
+
+  //--- 電圧&バッテリー計算 ---
+  int raw = analogRead(analogPin);
+  float vpin  = (raw / adcMax) * vRef;
+  float battV = calibrateVoltage(vpin / voltageDividerRatio);
+  float perc  = constrain((battV - 20.5) / (25.2 - 20.5) * 100.0, 0.0, 100.0);
+
+  //--- 画面描画 ---
+  sprite.fillSprite(BLACK);
+  // RPM
+  sprite.setTextSize(4);
+  char buf[8]; sprintf(buf, "%d", rpm);
+  int tw = sprite.textWidth(buf);
+  sprite.setCursor(160 + 24*3 - tw - 6, 17);
+  sprite.print(buf);
+  sprite.setTextSize(3);
+  sprite.setCursor(130 + (24*4 - 18*3), 50);
+  sprite.print("RPM");
+  // バッテリー%
+  sprite.setTextSize(3);
+  sprite.setCursor(30, 10);
+  sprite.printf("%3.0f%%", perc);
+  sprite.setCursor(12, 40);
+  sprite.printf("%.1fV", battV);
+  // バッテリーアイコン
+  sprite.setTextSize(1);
+  drawBattery(battV, perc);
+  sprite.pushSprite(0, 0);
+
+  //--- 低電圧自動オフ ---
+  if (battV < cutoffVoltage) {
+    Serial.println("[SYSTEM] Low voltage detected, going to deep sleep");
+    M5.Lcd.fillScreen(BLACK);
+    delay(100);
+    esp_deep_sleep_start();
+  }
+
+  //--- GPIO 出力 ---
+  digitalWrite(CONTROL_PIN,   ControlState & 0x01);
+  digitalWrite(CONTROL_PIN_2, (ControlState >> 1) & 0x01);
+
+  delay(10);
 }
