@@ -48,6 +48,9 @@ const unsigned long LONGPRESS_MS = 2000;
 //---- バッテリーオフ閾値 ----
 const float cutoffVoltage = 5.0;  // V
 
+//---- 文字の色 ----
+uint16_t SFGreen = sprite.color565(0, 255, 180);
+
 //---- コールバック ----
 void onDeviceConnect() {
   Serial.println("[BLE] Connected");
@@ -93,8 +96,8 @@ void drawBattery(float voltage, float percentage) {
   int usable = h - margin*2;
   int lvl = map((int)percentage, 0, 100, 0, usable);
   uint16_t col = (percentage<20? RED : (percentage<60? YELLOW : GREEN));
-  sprite.drawRect(x, y, w, h, WHITE);
-  sprite.drawRect(x+8, y-6, 19, 7, WHITE);
+  sprite.drawRect(x, y, w, h, SFGreen);
+  sprite.drawRect(x+8, y-6, 19, 7, SFGreen);
   if (lvl > 0) {
     sprite.fillRect(x+margin, y+h-margin-lvl, w-margin*2, lvl, col);
   }
@@ -103,7 +106,7 @@ void drawBattery(float voltage, float percentage) {
     sprite.setTextColor(RED, BLACK);
     sprite.setCursor(x+7, y+11);
     sprite.print("!");
-    sprite.setTextColor(WHITE, BLACK);
+    sprite.setTextColor(SFGreen, BLACK);
   }
 }
 
@@ -164,7 +167,7 @@ void loop(){
     lastHighChange = millis();
     prevHighState  = rawHigh;
     if (rawHigh) {
-      ControlState = 0b01;
+      ControlState = 1;
       Serial.println("[BTN] High → Full");
     }
   }
@@ -180,7 +183,7 @@ void loop(){
       // リリース
       unsigned long dur = millis() - lowPressStart;
       if (!lowLongHandled && dur < LONGPRESS_MS) {
-        ControlState = 0b00;
+        ControlState = 0;
         Serial.println("[BTN] Low → Stop");
       }
     }
@@ -188,24 +191,37 @@ void loop(){
   }
   // 長押し検出
   if (prevLowState && !lowLongHandled && millis() - lowPressStart >= LONGPRESS_MS) {
-    ControlState   = 0b11;
+    ControlState   = 2;
     lowLongHandled = true;
     Serial.println("[BTN] Low long → Brake");
   }
 
-  // 送信（1バイト）
+  // 送信
   Wire.beginTransmission(I2C_DEV_ADDR);
   Wire.write((uint8_t)ControlState);
-  uint8_t err = Wire.endTransmission();
+  uint8_t txErr = Wire.endTransmission(true);
+  Serial.printf("TX state=%u, err=%u\n", ControlState, txErr);
+  
+  delay(5);  // 5msほど待って、STM32がHAL_I2C_Slave_Transmitに入るのを待つ
 
-  // 受信（4バイト＝uint32_t）
-  if (Wire.requestFrom(I2C_DEV_ADDR, (uint8_t)4) == 4) {
-    uint32_t v = 0;
-    for (int i = 0; i < 4; i++) {
-      v |= (uint32_t)Wire.read() << (8 * i);
-    }
+  // 受信
+  uint8_t i2cBuf[4] = {0};
+  uint8_t len = Wire.requestFrom(I2C_DEV_ADDR, (uint8_t)4, true);
+  Serial.printf("RX len=%u\n", len);
+  for (uint8_t i = 0; i < len; i++) {
+    i2cBuf[i] = Wire.read();
+    Serial.printf("  i2cBuf[%u]=0x%02X\n", i, i2cBuf[i]);
+  }
+  if (len == 4) {
+    uint32_t v =  (uint32_t)i2cBuf[0]
+                | ((uint32_t)i2cBuf[1] << 8)
+                | ((uint32_t)i2cBuf[2] << 16)
+                | ((uint32_t)i2cBuf[3] << 24);
+    Serial.printf("  rpm=%lu\n", v);
     rpm = v;
   }
+
+  
 
   //--- 電圧&バッテリー計算 ---
   int raw = analogRead(analogPin);
@@ -217,10 +233,10 @@ void loop(){
   sprite.fillSprite(BLACK);
   // RPM
   sprite.setTextSize(4);
-  char buf[8]; sprintf(buf, "%d", rpm);
-  int tw = sprite.textWidth(buf);
+  char strBuf[16]; sprintf(strBuf, "%lu", rpm);
+  int tw = sprite.textWidth(strBuf);
   sprite.setCursor(160 + 24*3 - tw - 6, 17);
-  sprite.print(buf);
+  sprite.print(strBuf);
   sprite.setTextSize(3);
   sprite.setCursor(130 + (24*4 - 18*3), 50);
   sprite.print("RPM");
