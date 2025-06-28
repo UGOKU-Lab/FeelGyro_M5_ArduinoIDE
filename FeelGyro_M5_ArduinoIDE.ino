@@ -1,5 +1,6 @@
 #include <M5StickCPlus2.h>
 #include <M5GFX.h>
+#include <Wire.h>
 #include "UGOKU_Pad_Controller.hpp"
 
 //---- サウンド定義 ----
@@ -7,6 +8,9 @@
 #define Bf4 466
 #define Af4 415
 #define Ef4 311
+
+//---- I2C 定義 ----
+#define I2C_DEV_ADDR 0x55
 
 //---- インスタンス ----
 UGOKU_Pad_Controller controller;
@@ -127,6 +131,9 @@ void setup(){
 
   prevHighState = false;
   prevLowState  = false;
+
+  // **ここで I2C マスターを準備**
+  Wire.begin(32, 33);   // SDA=32, SCL=33
 }
 
 void loop(){
@@ -186,8 +193,19 @@ void loop(){
     Serial.println("[BTN] Low long → Brake");
   }
 
-  //--- RPM 計算 ---
-  rpm = (ControlState == 0b01) ? 7000 : 0;
+  // 送信（1バイト）
+  Wire.beginTransmission(I2C_DEV_ADDR);
+  Wire.write((uint8_t)ControlState);
+  uint8_t err = Wire.endTransmission();
+
+  // 受信（4バイト＝uint32_t）
+  if (Wire.requestFrom(I2C_DEV_ADDR, (uint8_t)4) == 4) {
+    uint32_t v = 0;
+    for (int i = 0; i < 4; i++) {
+      v |= (uint32_t)Wire.read() << (8 * i);
+    }
+    rpm = v;
+  }
 
   //--- 電圧&バッテリー計算 ---
   int raw = analogRead(analogPin);
@@ -225,9 +243,5 @@ void loop(){
     esp_deep_sleep_start();
   }
 
-  //--- GPIO 出力 ---
-  digitalWrite(CONTROL_PIN,   ControlState & 0x01);
-  digitalWrite(CONTROL_PIN_2, (ControlState >> 1) & 0x01);
-
-  delay(10);
+  delay(50);
 }
