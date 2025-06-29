@@ -35,6 +35,7 @@ const float vRef = 3.3;
 bool     isConnected    = false;
 int      ControlState   = 0;      // 0b00:停止, 0b01:全開, 0b11:ブレーキ
 int      rpm            = 0;
+int      temp           = 0;
 uint8_t  lastCh1Val     = 0xFF, lastCh2Val = 0xFF, lastCh3Val = 0xFF;
 
 //---- ボタン＆デバウンス用 ----
@@ -205,14 +206,14 @@ void loop(){
   delay(5);  // 5msほど待って、STM32がHAL_I2C_Slave_Transmitに入るのを待つ
 
   // 受信
-  uint8_t i2cBuf[4] = {0};
-  uint8_t len = Wire.requestFrom(I2C_DEV_ADDR, (uint8_t)4, true);
+  uint8_t i2cBuf[5] = {0};
+  uint8_t len = Wire.requestFrom(I2C_DEV_ADDR, (uint8_t)5, true);
   Serial.printf("RX len=%u\n", len);
   for (uint8_t i = 0; i < len; i++) {
     i2cBuf[i] = Wire.read();
     Serial.printf("  i2cBuf[%u]=0x%02X\n", i, i2cBuf[i]);
   }
-  if (len == 4) {
+  if (len >= 4) {
     uint32_t v =  (uint32_t)i2cBuf[0]
                 | ((uint32_t)i2cBuf[1] << 8)
                 | ((uint32_t)i2cBuf[2] << 16)
@@ -220,8 +221,11 @@ void loop(){
     Serial.printf("  rpm=%lu\n", v);
     rpm = v;
   }
-
-  
+  if (len >= 5) {
+    uint8_t t = (int8_t)i2cBuf[4];  // 5バイト目を温度として拾う
+    Serial.printf("  temp=%d°C\n", t);
+    temp = t;
+  }
 
   //--- 電圧&バッテリー計算 ---
   int raw = analogRead(analogPin);
@@ -231,15 +235,29 @@ void loop(){
 
   //--- 画面描画 ---
   sprite.fillSprite(BLACK);
+
   // RPM
   sprite.setTextSize(4);
-  char strBuf[16]; sprintf(strBuf, "%lu", rpm);
+  int dispRpm = (rpm < 15) ? 0 : rpm;
+  char strBuf[16]; sprintf(strBuf, "%lu", dispRpm);
   int tw = sprite.textWidth(strBuf);
   sprite.setCursor(160 + 24*3 - tw - 6, 17);
   sprite.print(strBuf);
   sprite.setTextSize(3);
   sprite.setCursor(130 + (24*4 - 18*3), 50);
   sprite.print("RPM");
+
+  // 巻き線温度
+  //sprite.setFont(&fonts::Font0);  
+  sprite.setTextSize(4);
+  char tmpBuf[16]; sprintf(tmpBuf, "%d", temp);
+  sprite.setCursor(130 + (24*4 - (24*2 + 18 + 10)), 88);           
+  sprite.print(tmpBuf);
+  sprite.drawCircle(130 + (24*4 - (24*2 + 18 + 10)) + 18*2 + 16, 88 + 9, 3, SFGreen);
+  sprite.setTextSize(3); 
+  sprite.setCursor(130 + (24*4 - (24*2 + 18 + 5)) + 48 + 5,88+6);  
+  sprite.printf("C");
+
   // バッテリー%
   sprite.setTextSize(3);
   sprite.setCursor(30, 10);
