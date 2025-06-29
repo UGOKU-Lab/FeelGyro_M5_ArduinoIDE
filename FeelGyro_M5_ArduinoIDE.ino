@@ -86,7 +86,7 @@ void showWelcomeScreen() {
   M5.Lcd.print("Welcome");
 }
 
-// 電圧補正（最小二乗法などで求めた補正式を適用）
+// 電圧補正
 float calibrateVoltage(float raw) {
   return raw + 1.2;
 }
@@ -136,7 +136,6 @@ void setup(){
   prevHighState = false;
   prevLowState  = false;
 
-  // **ここで I2C マスターを準備**
   Wire.begin(32, 33);   // SDA=32, SCL=33
 }
 
