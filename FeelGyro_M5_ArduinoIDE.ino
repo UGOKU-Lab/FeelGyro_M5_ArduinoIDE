@@ -33,8 +33,15 @@ const float vRef = 3.3;
 
 //---- グローバル変数 ----
 bool     isConnected    = false;
-int      ControlState   = 0;      // 0b00:停止, 0b01:全開, 0b11:ブレーキ
+int      ControlState   = 0;      // 0:停止, 1:全開, 2:ブレーキ
 int      rpm            = 0;
+float filteredRpm = 0.0;
+const float alpha = 0.1;  // 平滑度。0.0～1.0で調整。大きいほど最新値に追従
+
+// battery percentage EMA 用
+float filteredSOC = 0.0;
+const float battAlpha = 0.1;  // 平滑度。0.0～1.0 で調整。小さいほどより滑らかに
+
 int      temp           = 0;
 uint8_t  lastCh1Val     = 0xFF, lastCh2Val = 0xFF, lastCh3Val = 0xFF;
 
@@ -137,34 +144,26 @@ void setup(){
   prevLowState  = false;
 
   Wire.begin(32, 33);   // SDA=32, SCL=33
+
+  // 起動直後のバッテリー百分率を取得して初期化
+  int raw = analogRead(analogPin);
+  float vpin  = (raw / adcMax) * vRef;
+  float battV = calibrateVoltage(vpin / voltageDividerRatio);
+  float SOC  = constrain((battV - 20.5) / (25.2 - 20.5) * 100.0, 0.0, 100.0);
+  filteredSOC = SOC;
 }
 
 void loop(){
-  //--- BLE 読み取り ---
-  if (isConnected) {
-    uint8_t err = controller.read_data();
-    if (err == no_err) {
-      uint8_t cnt = controller.getLastPairsCount();
-      for (uint8_t i = 0; i < cnt; i++) {
-        uint8_t ch = controller.getDataByChannel(i+1);
-        if (ch == HIGH) {
-          if      (i+1 == 1) { ControlState = 0b01; Serial.println("[BLE] Full"); }
-          else if (i+1 == 2) { ControlState = 0b00; Serial.println("[BLE] Stop"); }
-          else if (i+1 == 3) { ControlState = 0b11; Serial.println("[BLE] Brake"); }
-        }
-      }
-      controller.write_data(10, rpm/100);
-    }
-  }
-
   //--- ボタン読み取り & デバウンス ---
   static unsigned long lastHighChange = 0, lastLowChange = 0;
   bool rawHigh = (digitalRead(BUTTON_SET_HIGH) == LOW);
   bool rawLow  = (digitalRead(BUTTON_SET_LOW)  == LOW);
+  bool physicalEvent = false;
 
   // High ボタン 短押し
   if (rawHigh != prevHighState && millis() - lastHighChange > DEBOUNCE_MS) {
     lastHighChange = millis();
+    physicalEvent = true;
     prevHighState  = rawHigh;
     if (rawHigh) {
       ControlState = 1;
@@ -175,6 +174,7 @@ void loop(){
   // Low ボタン デバウンス&長押し判定
   if (rawLow != prevLowState && millis() - lastLowChange > DEBOUNCE_MS) {
     lastLowChange = millis();
+    physicalEvent = true;
     if (rawLow) {
       // 押し始め
       lowPressStart = millis();
@@ -192,9 +192,30 @@ void loop(){
   // 長押し検出
   if (prevLowState && !lowLongHandled && millis() - lowPressStart >= LONGPRESS_MS) {
     ControlState   = 2;
+    physicalEvent = true;
     lowLongHandled = true;
     Serial.println("[BTN] Low long → Brake");
   }
+
+  //--- BLE 読み取り ---
+  if (isConnected && !physicalEvent) {
+    uint8_t err = controller.read_data();
+    if (err == no_err) {
+      uint8_t cnt = controller.getLastPairsCount();
+      for (uint8_t i = 0; i < cnt; i++) {
+        uint8_t ch = controller.getDataByChannel(i+1);
+        if (ch == HIGH) {
+          if      (i+1 == 1) { ControlState = 0b01; Serial.println("[BLE] Full"); }
+          else if (i+1 == 2) { ControlState = 0b00; Serial.println("[BLE] Stop"); }
+          else if (i+1 == 3) { ControlState = 0b11; Serial.println("[BLE] Brake"); }
+        }
+      }
+    }
+  }
+
+  if (isConnected) {
+    controller.write_data(10, rpm/100);
+  }  
 
   // 送信
   Wire.beginTransmission(I2C_DEV_ADDR);
@@ -225,19 +246,22 @@ void loop(){
     Serial.printf("  temp=%d°C\n", t);
     temp = t;
   }
+  
 
   //--- 電圧&バッテリー計算 ---
   int raw = analogRead(analogPin);
   float vpin  = (raw / adcMax) * vRef;
   float battV = calibrateVoltage(vpin / voltageDividerRatio);
-  float perc  = constrain((battV - 20.5) / (25.2 - 20.5) * 100.0, 0.0, 100.0);
+  float SOC  = constrain((battV - 20.5) / (25.2 - 20.5) * 100.0, 0.0, 100.0);
+  filteredSOC = filteredSOC * (1.0 - battAlpha) + SOC * battAlpha;
 
   //--- 画面描画 ---
   sprite.fillSprite(BLACK);
 
   // RPM
+  filteredRpm = filteredRpm * (1.0 - alpha) + rpm * alpha; // 指数移動平均フィルタ
   sprite.setTextSize(4);
-  int dispRpm = (rpm < 15) ? 0 : rpm;
+  int dispRpm = ((int)filteredRpm < 15) ? 0 : (int)filteredRpm;
   char strBuf[16]; sprintf(strBuf, "%lu", dispRpm);
   int tw = sprite.textWidth(strBuf);
   sprite.setCursor(160 + 24*3 - tw - 6, 17);
@@ -247,7 +271,6 @@ void loop(){
   sprite.print("RPM");
 
   // 巻き線温度
-  //sprite.setFont(&fonts::Font0);  
   sprite.setTextSize(4);
   char tmpBuf[16]; sprintf(tmpBuf, "%d", temp);
   sprite.setCursor(130 + (24*4 - (24*2 + 18 + 10)), 88);           
@@ -260,12 +283,12 @@ void loop(){
   // バッテリー%
   sprite.setTextSize(3);
   sprite.setCursor(30, 10);
-  sprite.printf("%3.0f%%", perc);
+  sprite.printf("%3.0f%%", filteredSOC);
   sprite.setCursor(12, 40);
   sprite.printf("%.1fV", battV);
   // バッテリーアイコン
   sprite.setTextSize(1);
-  drawBattery(battV, perc);
+  drawBattery(battV, filteredSOC);
   sprite.pushSprite(0, 0);
 
   //--- 低電圧自動オフ ---
